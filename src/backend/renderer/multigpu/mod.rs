@@ -2038,6 +2038,9 @@ where
         damage: &[Rectangle<i32, BufferCoords>],
     ) -> Result<<Self as RendererSuper>::TextureId, <Self as RendererSuper>::Error> {
         let dmabuf = get_dmabuf(buffer).expect("import_dma_buffer without checking buffer type?");
+        if let Some(surface) = surface {
+            super::apply_color_representation(dmabuf, surface);
+        }
         let texture = MultiTexture::from_surface(surface, dmabuf.size(), dmabuf.format());
         let texture_ref = texture.0.clone();
         let res = self.import_dmabuf_internal(dmabuf, texture, Some(damage));

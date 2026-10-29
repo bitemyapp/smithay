@@ -155,6 +155,9 @@ pub struct PlaneConfig<'a> {
     pub fb: framebuffer::Handle,
     /// Optional fence
     pub fence: Option<BorrowedFd<'a>>,
+    /// How a Y′CbCr framebuffer converts to R′G′B′ (the plane's `COLOR_ENCODING` and
+    /// `COLOR_RANGE`); none for R′G′B′ framebuffers
+    pub yuv_conversion: Option<crate::backend::allocator::dmabuf::YuvConversion>,
 }
 
 /// VRR support state

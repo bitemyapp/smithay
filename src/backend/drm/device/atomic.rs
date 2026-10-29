@@ -28,6 +28,8 @@ pub struct PropMapping {
     pub connectors: HashMap<connector::Handle, HashMap<String, property::Handle>>,
     pub crtcs: HashMap<crtc::Handle, HashMap<String, property::Handle>>,
     pub planes: HashMap<plane::Handle, HashMap<String, property::Handle>>,
+    /// The named values of the planes' enum properties
+    pub enums: HashMap<property::Handle, Vec<(String, property::RawValue)>>,
 }
 
 impl PropMapping {
@@ -77,6 +79,24 @@ impl PropMapping {
                 name,
             })
             .copied()
+    }
+
+    /// The raw value of the enum property `name` of a plane named `value`
+    pub(crate) fn plane_enum_value(
+        &self,
+        handle: plane::Handle,
+        name: &'static str,
+        value: &str,
+    ) -> Result<property::RawValue, Error> {
+        let prop = self.plane_prop_handle(handle, name)?;
+        self.enums
+            .get(&prop)
+            .and_then(|values| values.iter().find(|(n, _)| n == value))
+            .map(|(_, raw)| *raw)
+            .ok_or(Error::UnknownProperty {
+                handle: handle.into(),
+                name,
+            })
     }
 }
 
@@ -134,6 +154,8 @@ impl AtomicDrmDevice {
         map_props(&dev.fd, res_handles.connectors(), &mut mapping.connectors)?;
         map_props(&dev.fd, res_handles.crtcs(), &mut mapping.crtcs)?;
         map_props(&dev.fd, &planes, &mut mapping.planes)?;
+        let PropMapping { planes, enums, .. } = &mut *mapping;
+        map_enums(&dev.fd, planes, enums);
 
         dev.old_state = old_state;
         trace!("Mapping: {:#?}", mapping);
@@ -343,4 +365,32 @@ where
                 source,
             })
         })
+}
+
+/// Record the named values of the planes' enum properties that the
+/// compositor sets by name (how a plane converts Y′CbCr framebuffers).
+pub(in crate::backend::drm) fn map_enums<D>(
+    fd: &D,
+    planes: &HashMap<plane::Handle, HashMap<String, property::Handle>>,
+    enums: &mut HashMap<property::Handle, Vec<(String, property::RawValue)>>,
+) where
+    D: ControlDevice,
+{
+    for props in planes.values() {
+        for name in ["COLOR_ENCODING", "COLOR_RANGE"] {
+            let Some(prop) = props.get(name) else { continue };
+            if let Ok(info) = fd.get_property(*prop) {
+                if let property::ValueType::Enum(values) = info.value_type() {
+                    let (_, values) = values.values();
+                    enums.insert(
+                        *prop,
+                        values
+                            .iter()
+                            .map(|v| (v.name().to_string_lossy().into_owned(), v.value()))
+                            .collect(),
+                    );
+                }
+            }
+        }
+    }
 }

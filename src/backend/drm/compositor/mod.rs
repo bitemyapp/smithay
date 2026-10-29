@@ -150,7 +150,7 @@ use crate::backend::renderer::{
 use crate::{
     backend::{
         allocator::{
-            dmabuf::{AsDmabuf, Dmabuf},
+            dmabuf::{is_yuv, AsDmabuf, Dmabuf, YuvConversion},
             format::{get_opaque, has_alpha},
             gbm::{GbmAllocator, GbmBuffer, GbmBufferFlags, GbmDevice},
             Allocator, Buffer, Slot, Swapchain,
@@ -457,6 +457,8 @@ struct PlaneProperties {
     pub transform: Transform,
     pub alpha: f32,
     pub format: DrmFormat,
+    /// How a Y′CbCr framebuffer converts to R′G′B′ on the plane
+    pub yuv_conversion: Option<YuvConversion>,
 }
 
 impl PlaneProperties {
@@ -467,6 +469,7 @@ impl PlaneProperties {
             && self.transform == other.transform
             && self.alpha == other.alpha
             && self.format == other.format
+            && self.yuv_conversion == other.yuv_conversion
     }
 }
 
@@ -813,6 +816,7 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
                     transform: config.properties.transform,
                     damage_clips: config.damage_clips.as_ref().map(|d| d.blob()),
                     fb: *config.buffer.as_ref(),
+                    yuv_conversion: config.properties.yuv_conversion,
                     fence: config
                         .sync
                         .as_ref()
@@ -1559,6 +1563,7 @@ where
                     transform: Transform::Normal,
                     alpha: 1.0,
                     format: buffer.format(),
+                    yuv_conversion: None,
                 },
                 buffer: DrmScanoutBuffer {
                     buffer: ScanoutBuffer::Swapchain(Arc::new(buffer)),
@@ -1825,6 +1830,7 @@ where
                     transform: Transform::Normal,
                     alpha: 1.0,
                     format: primary_plane_buffer.format(),
+                    yuv_conversion: None,
                 },
                 buffer: DrmScanoutBuffer {
                     buffer: ScanoutBuffer::Swapchain(Arc::new(primary_plane_buffer)),
@@ -3363,6 +3369,7 @@ where
                 alpha: 1.0,
                 transform: Transform::Normal,
                 format: framebuffer.format(),
+                yuv_conversion: None,
             },
             buffer: DrmScanoutBuffer {
                 buffer: ScanoutBuffer::Cursor(Arc::new(cursor_buffer)),
@@ -3553,12 +3560,23 @@ where
             output_transform.invert(),
         );
         let alpha = element.alpha();
+        // A Y′CbCr buffer shows as renderers sample it: with its conversion,
+        // or the default one.
+        let yuv_conversion = match &underlying_storage {
+            #[cfg(feature = "wayland_frontend")]
+            UnderlyingStorage::Wayland(buffer) => crate::wayland::dmabuf::get_dmabuf(buffer)
+                .ok()
+                .filter(|dmabuf| is_yuv(dmabuf.format().code))
+                .map(|dmabuf| dmabuf.yuv_conversion().unwrap_or_default()),
+            _ => None,
+        };
         let properties = PlaneProperties {
             src,
             dst,
             alpha,
             transform,
             format: fb.format(),
+            yuv_conversion,
         };
         let buffer: DrmScanoutBuffer<
             <A as Allocator>::Buffer,

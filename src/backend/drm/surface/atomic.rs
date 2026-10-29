@@ -351,6 +351,7 @@ impl AtomicDrmSurface {
                     damage_clips: None,
                     fb: test_buffer.fb,
                     fence: None,
+                    yuv_conversion: None,
                 }),
             };
 
@@ -410,6 +411,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                yuv_conversion: None,
             }),
         };
 
@@ -470,6 +472,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                yuv_conversion: None,
             }),
         };
         let req = AtomicRequest::build_request(
@@ -524,6 +527,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                yuv_conversion: None,
             }),
         };
         let req = AtomicRequest::build_request(
@@ -652,6 +656,7 @@ impl AtomicDrmSurface {
                 damage_clips: None,
                 fb: test_buffer.fb,
                 fence: None,
+                yuv_conversion: None,
             }),
         };
 
@@ -1248,6 +1253,32 @@ impl<'a> AtomicRequest<'a> {
                     handle: handle.into(),
                     name: "alpha",
                 });
+            }
+            if let Some(yuv) = config.yuv_conversion {
+                use crate::backend::allocator::dmabuf::{YuvMatrix, YuvRange};
+                let encoding = match yuv.matrix {
+                    YuvMatrix::Bt601 => "ITU-R BT.601 YCbCr",
+                    YuvMatrix::Bt709 => "ITU-R BT.709 YCbCr",
+                    YuvMatrix::Bt2020 => "ITU-R BT.2020 YCbCr",
+                };
+                let range = match yuv.range {
+                    YuvRange::Limited => "YCbCr limited range",
+                    YuvRange::Full => "YCbCr full range",
+                };
+                // Without the properties a plane converts as BT.601 in
+                // limited range, and can show nothing else.
+                for (name, value, default) in [
+                    ("COLOR_ENCODING", encoding, yuv.matrix == YuvMatrix::Bt601),
+                    ("COLOR_RANGE", range, yuv.range == YuvRange::Limited),
+                ] {
+                    match self.mapping.plane_enum_value(handle, name, value) {
+                        Ok(raw) => {
+                            plane_props.insert(name, property::Value::UnsignedRange(raw));
+                        }
+                        Err(_) if default && self.mapping.plane_prop_handle(handle, name).is_err() => {}
+                        Err(err) => return Err(err),
+                    }
+                }
             }
             if self.mapping.plane_prop_handle(handle, "FB_DAMAGE_CLIPS").is_ok() {
                 if let Some(damage) = config.damage_clips.as_ref() {

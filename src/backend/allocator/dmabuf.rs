@@ -50,6 +50,120 @@ pub(crate) struct DmabufInternal {
     /// This is inferred from client apis, however there is no kernel api or guarantee this is correct
     #[cfg(feature = "backend_drm")]
     node: Mutex<Option<DrmNode>>,
+    /// How Y′CbCr contents convert to R′G′B′, if known
+    yuv_conversion: Mutex<Option<YuvConversion>>,
+}
+
+/// How the Y′CbCr samples of a buffer convert to R′G′B′: the matrix
+/// coefficients, the quantization range and where chroma samples sit.
+///
+/// Renderers use it when they sample a buffer of a Y′CbCr format, and the
+/// [`DrmCompositor`](crate::backend::drm::compositor::DrmCompositor) when it
+/// shows one on a plane. It means nothing for R′G′B′ formats.
+///
+/// The default is what is assumed of a buffer with no conversion set:
+/// BT.601, limited range, chroma location left unsaid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct YuvConversion {
+    /// Matrix coefficients
+    pub matrix: YuvMatrix,
+    /// Quantization range
+    pub range: YuvRange,
+    /// Position of subsampled chroma samples, for 4:2:0 formats
+    pub chroma_location: Option<ChromaLocation>,
+}
+
+/// Matrix coefficients of a Y′CbCr encoding (ITU-T H.273 MatrixCoefficients)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum YuvMatrix {
+    /// Rec. ITU-R BT.601 (H.273 code points 5 and 6)
+    #[default]
+    Bt601,
+    /// Rec. ITU-R BT.709 (H.273 code point 1)
+    Bt709,
+    /// Rec. ITU-R BT.2020, non-constant luminance (H.273 code point 9)
+    Bt2020,
+}
+
+/// Quantization range of a Y′CbCr encoding
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum YuvRange {
+    /// Limited ("TV", "studio") range: luma from 16 to 235 in 8 bits
+    #[default]
+    Limited,
+    /// Full ("PC", "JPEG") range
+    Full,
+}
+
+/// Position of subsampled chroma samples relative to luma samples, for 4:2:0
+/// formats (ITU-T H.273 Chroma420SampleLocType)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChromaLocation {
+    /// Horizontally co-sited, vertically between rows (type 0, "left")
+    Type0,
+    /// Between columns and rows (type 1, "center")
+    Type1,
+    /// Co-sited with the top-left luma sample (type 2, "top left")
+    Type2,
+    /// Between columns, co-sited with the top row (type 3, "top")
+    Type3,
+    /// Horizontally co-sited, with the bottom row (type 4, "bottom left")
+    Type4,
+    /// Between columns, with the bottom row (type 5, "bottom")
+    Type5,
+}
+
+/// Whether `format` holds Y′CbCr samples, as opposed to R′G′B′
+pub fn is_yuv(format: Fourcc) -> bool {
+    use Fourcc::*;
+    matches!(
+        format,
+        Nv12 | Nv21
+            | Nv15
+            | Nv16
+            | Nv61
+            | Nv24
+            | Nv42
+            | P010
+            | P012
+            | P016
+            | P210
+            | Q410
+            | Q401
+            | Yuv410
+            | Yvu410
+            | Yuv411
+            | Yvu411
+            | Yuv420
+            | Yvu420
+            | Yuv422
+            | Yvu422
+            | Yuv444
+            | Yvu444
+            | Yuyv
+            | Yvyu
+            | Uyvy
+            | Vyuy
+            | Ayuv
+            | Xyuv8888
+            | Vuy888
+            | Vuy101010
+            | Y210
+            | Y212
+            | Y216
+            | Y410
+            | Y412
+            | Y416
+            | Xvyu2101010
+            | Xvyu12_16161616
+            | Xvyu16161616
+            | Yuv420_8bit
+            | Yuv420_10bit
+            | X0l0
+            | X0l2
+            | Y0l0
+            | Y0l2
+    )
 }
 
 #[derive(Debug)]
@@ -222,6 +336,7 @@ impl Dmabuf {
                 flags,
                 #[cfg(feature = "backend_drm")]
                 node: Mutex::new(None),
+                yuv_conversion: Mutex::new(None),
             },
         }
     }
@@ -276,6 +391,23 @@ impl Dmabuf {
     #[cfg(feature = "backend_drm")]
     pub fn set_node(&self, node: impl Into<Option<DrmNode>>) {
         *self.0.node.lock().unwrap() = node.into();
+    }
+
+    /// How this buffer's Y′CbCr contents convert to R′G′B′, if known (see
+    /// [`YuvConversion`]; none means its default)
+    pub fn yuv_conversion(&self) -> Option<YuvConversion> {
+        *self.0.yuv_conversion.lock().unwrap()
+    }
+
+    /// Sets or unsets how this buffer's Y′CbCr contents convert to R′G′B′
+    /// (see [`Dmabuf::yuv_conversion`]).
+    ///
+    /// Renderers import the buffer anew when it changes. For a wl_buffer,
+    /// [`ImportDmaWl`](crate::backend::renderer::ImportDmaWl) sets it from
+    /// the surface's color representation
+    /// ([`color_representation`](crate::wayland::color_representation)).
+    pub fn set_yuv_conversion(&self, conversion: Option<YuvConversion>) {
+        *self.0.yuv_conversion.lock().unwrap() = conversion;
     }
 
     /// Create an [`calloop::EventSource`] and [`Blocker`] for this [`Dmabuf`].

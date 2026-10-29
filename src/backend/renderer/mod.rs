@@ -600,15 +600,42 @@ pub trait ImportDmaWl: ImportDma {
     ///
     /// The implementation defines, if the id keeps being valid, if the buffer is released,
     /// to avoid relying on implementation details, keep the buffer alive, until you destroyed this texture again.
+    ///
+    /// The surface's color representation, if given, is applied to the dmabuf first (see
+    /// [`apply_color_representation`]).
     fn import_dma_buffer(
         &mut self,
         buffer: &wl_buffer::WlBuffer,
-        _surface: Option<&crate::wayland::compositor::SurfaceData>,
+        surface: Option<&crate::wayland::compositor::SurfaceData>,
         damage: &[Rectangle<i32, BufferCoord>],
     ) -> Result<Self::TextureId, Self::Error> {
         let dmabuf = crate::wayland::dmabuf::get_dmabuf(buffer)
             .expect("import_dma_buffer without checking buffer type?");
+        if let Some(surface) = surface {
+            apply_color_representation(dmabuf, surface);
+        }
         self.import_dmabuf(dmabuf, Some(damage))
+    }
+}
+
+/// Set how a surface's Y′CbCr dmabuf converts to R′G′B′ from the surface's
+/// current color representation
+/// ([`color_representation`](crate::wayland::color_representation)), as
+/// renderers sampling it and the
+/// [`DrmCompositor`](crate::backend::drm::compositor::DrmCompositor) showing
+/// it on a plane read it.
+///
+/// The conversion belongs to the buffer as last committed: a buffer shown
+/// on two surfaces at once, with different representations, shows as the
+/// last imported.
+#[cfg(feature = "wayland_frontend")]
+pub fn apply_color_representation(dmabuf: &Dmabuf, surface: &crate::wayland::compositor::SurfaceData) {
+    use crate::backend::allocator::Buffer as _;
+    if crate::backend::allocator::dmabuf::is_yuv(dmabuf.format().code) {
+        let yuv = crate::wayland::color_representation::yuv_conversion(surface);
+        if dmabuf.yuv_conversion() != yuv {
+            dmabuf.set_yuv_conversion(yuv);
+        }
     }
 }
 

@@ -812,6 +812,59 @@ impl EGLDisplay {
             }
         }
 
+        // How Y′CbCr samples become R′G′B′ when the image is sampled
+        // (EGL_EXT_image_dma_buf_import's hints; without them, BT.601 limited
+        // range).
+        if let Some(yuv) = dmabuf
+            .yuv_conversion()
+            .filter(|_| crate::backend::allocator::dmabuf::is_yuv(dmabuf.format().code))
+        {
+            use crate::backend::allocator::dmabuf::{ChromaLocation, YuvMatrix, YuvRange};
+            out.extend([
+                ffi::egl::YUV_COLOR_SPACE_HINT_EXT as i32,
+                match yuv.matrix {
+                    YuvMatrix::Bt601 => ffi::egl::ITU_REC601_EXT,
+                    YuvMatrix::Bt709 => ffi::egl::ITU_REC709_EXT,
+                    YuvMatrix::Bt2020 => ffi::egl::ITU_REC2020_EXT,
+                } as i32,
+                ffi::egl::SAMPLE_RANGE_HINT_EXT as i32,
+                match yuv.range {
+                    YuvRange::Limited => ffi::egl::YUV_NARROW_RANGE_EXT,
+                    YuvRange::Full => ffi::egl::YUV_FULL_RANGE_EXT,
+                } as i32,
+            ]);
+            // EGL sites chroma at 0 or 0.5 of a sample; types 4 and 5 (on the
+            // bottom row) say only their horizontal siting.
+            let (horizontal, vertical) = match yuv.chroma_location {
+                Some(ChromaLocation::Type0) => (Some(0.0), Some(0.5)),
+                Some(ChromaLocation::Type1) => (Some(0.5), Some(0.5)),
+                Some(ChromaLocation::Type2) => (Some(0.0), Some(0.0)),
+                Some(ChromaLocation::Type3) => (Some(0.5), Some(0.0)),
+                Some(ChromaLocation::Type4) => (Some(0.0), None),
+                Some(ChromaLocation::Type5) => (Some(0.5), None),
+                None => (None, None),
+            };
+            let siting = |at: f32| {
+                if at == 0.0 {
+                    ffi::egl::YUV_CHROMA_SITING_0_EXT
+                } else {
+                    ffi::egl::YUV_CHROMA_SITING_0_5_EXT
+                }
+            };
+            if let Some(at) = horizontal {
+                out.extend([
+                    ffi::egl::YUV_CHROMA_HORIZONTAL_SITING_HINT_EXT as i32,
+                    siting(at) as i32,
+                ]);
+            }
+            if let Some(at) = vertical {
+                out.extend([
+                    ffi::egl::YUV_CHROMA_VERTICAL_SITING_HINT_EXT as i32,
+                    siting(at) as i32,
+                ]);
+            }
+        }
+
         out.push(ffi::egl::NONE as i32);
 
         unsafe {

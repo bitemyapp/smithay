@@ -42,7 +42,7 @@ use super::{
 use crate::{
     backend::{
         allocator::{
-            dmabuf::{Dmabuf, WeakDmabuf},
+            dmabuf::{Dmabuf, WeakDmabuf, YuvConversion},
             format::{get_bpp, get_opaque, has_alpha, FormatSet},
             Buffer, Format, Fourcc,
         },
@@ -300,7 +300,8 @@ pub struct GlesRenderer {
 
     // caches
     buffers: Vec<GlesBuffer>,
-    dmabuf_cache: HashMap<WeakDmabuf, GlesTexture>,
+    /// Textures of imported dmabufs, with the Y′CbCr conversion each was imported with
+    dmabuf_cache: HashMap<WeakDmabuf, (GlesTexture, Option<YuvConversion>)>,
     vbos: [ffi::types::GLuint; 2],
     vertices: Vec<f32>,
     non_opaque_damage: Vec<Rectangle<i32, Physical>>,
@@ -704,7 +705,7 @@ impl GlesRenderer {
 
     #[profiling::function]
     fn cleanup(&mut self) {
-        self.dmabuf_cache.retain(|entry, _tex| !entry.is_gone());
+        self.dmabuf_cache.retain(|entry, _| !entry.is_gone());
         // Free outdated buffer resources
         // TODO: Replace with `drain_filter` once it lands
         let mut i = 0;
@@ -1200,7 +1201,8 @@ impl ImportDma for GlesRenderer {
                 egl_images: Some(vec![image]),
                 destruction_callback_sender: self.destruction_callback_sender.clone(),
             }));
-            self.dmabuf_cache.insert(buffer.weak(), texture.clone());
+            self.dmabuf_cache
+                .insert(buffer.weak(), (texture.clone(), buffer.yuv_conversion()));
             Ok(texture)
         })
     }
@@ -1220,9 +1222,14 @@ impl ImportDmaWl for GlesRenderer {}
 impl GlesRenderer {
     #[profiling::function]
     fn existing_dmabuf_texture(&self, buffer: &Dmabuf) -> Result<Option<GlesTexture>, GlesError> {
-        let Some(texture) = self.dmabuf_cache.get(&buffer.weak()) else {
+        let Some((texture, yuv)) = self.dmabuf_cache.get(&buffer.weak()) else {
             return Ok(None);
         };
+        // Sampled with another Y′CbCr conversion now: imported anew, in place
+        // of this one.
+        if *yuv != buffer.yuv_conversion() {
+            return Ok(None);
+        }
 
         trace!("Re-using texture {:?} for {:?}", texture.0.texture, buffer);
         if let Some(egl_images) = texture.0.egl_images.as_ref() {
