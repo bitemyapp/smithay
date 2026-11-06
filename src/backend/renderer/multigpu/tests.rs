@@ -9,7 +9,6 @@
 //! copy_completion_* tests require neither DRM identities nor hardware.
 use super::*;
 use crate::backend::allocator::dmabuf::DmabufFlags;
-use parking_lot::Mutex;
 use std::{collections::VecDeque, fs::File, os::fd::OwnedFd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -43,12 +42,17 @@ impl fmt::Debug for Queue {
 }
 impl Queue {
     fn submit(&self, command: impl FnOnce() + Send + 'static) {
-        self.commands.lock().push_back(Box::new(command));
+        self.commands.lock().unwrap().push_back(Box::new(command));
         self.submitted.fetch_add(1, SeqCst);
     }
     fn drain_to(&self, serial: usize) {
         while self.completed.load(SeqCst) < serial {
-            let command = self.commands.lock().pop_front().expect("cyclic GPU wait");
+            let command = self
+                .commands
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("cyclic GPU wait");
             command();
             self.completed.fetch_add(1, SeqCst);
         }
@@ -104,7 +108,7 @@ impl Image {
         }
     }
     fn pixel(&self, x: usize) -> [u8; 4] {
-        self.pixels.lock()[x * 4..x * 4 + 4].try_into().unwrap()
+        self.pixels.lock().unwrap()[x * 4..x * 4 + 4].try_into().unwrap()
     }
 }
 impl Texture for Image {
@@ -202,7 +206,7 @@ impl Renderer for QueuedRenderer {
         })
     }
     fn wait(&mut self, sync: &SyncPoint) -> Result<(), Failure> {
-        let mut faults = self.faults.lock();
+        let mut faults = self.faults.lock().unwrap();
         faults.waits += 1;
         if let Some(error) = faults.wait {
             return Err(error);
@@ -211,7 +215,7 @@ impl Renderer for QueuedRenderer {
         Ok(())
     }
     fn cleanup_texture_cache(&mut self) -> Result<(), Failure> {
-        if self.faults.lock().cleanup {
+        if self.faults.lock().unwrap().cleanup {
             Err(Failure::Injected)
         } else {
             Ok(())
@@ -225,9 +229,10 @@ impl Bind<Image> for QueuedRenderer {
 }
 impl Bind<Dmabuf> for QueuedRenderer {
     fn bind<'a>(&mut self, target: &'a mut Dmabuf) -> Result<Image, Failure> {
-        self.faults.lock().binds += 1;
+        self.faults.lock().unwrap().binds += 1;
         self.images
             .lock()
+            .unwrap()
             .get(target)
             .cloned()
             .ok_or(Failure::Unsupported)
@@ -259,6 +264,7 @@ impl ImportDma for QueuedRenderer {
         }
         self.images
             .lock()
+            .unwrap()
             .get(buffer)
             .cloned()
             .ok_or(Failure::Unsupported)
@@ -276,7 +282,7 @@ impl ImportMem for QueuedRenderer {
             return Err(Failure::Unsupported);
         }
         let image = Image::new(size, format);
-        image.pixels.lock().copy_from_slice(data);
+        image.pixels.lock().unwrap().copy_from_slice(data);
         Ok(image)
     }
     fn update_memory(
@@ -285,7 +291,7 @@ impl ImportMem for QueuedRenderer {
         data: &[u8],
         region: Rectangle<i32, BufferCoords>,
     ) -> Result<(), Failure> {
-        let mut pixels = texture.pixels.lock();
+        let mut pixels = texture.pixels.lock().unwrap();
         for y in 0..region.size.h {
             for x in 0..region.size.w {
                 let dst = ((region.loc.y + y) * texture.size.w + region.loc.x + x) as usize * 4;
@@ -316,7 +322,7 @@ impl ExportMem for QueuedRenderer {
         format: Fourcc,
     ) -> Result<Mapping, Failure> {
         self.queue.drain();
-        let pixels = image.pixels.lock();
+        let pixels = image.pixels.lock().unwrap();
         let mut data = Vec::new();
         for y in rect.loc.y..rect.loc.y + rect.size.h {
             let start = (y * image.size.w + rect.loc.x) as usize * 4;
@@ -353,7 +359,7 @@ impl Frame for QueuedFrame {
         let damage = damage.to_vec();
         let color = color.components().map(|v| (v * 255.0).round() as u8);
         self.queue.submit(move || {
-            let mut pixels = target.pixels.lock();
+            let mut pixels = target.pixels.lock().unwrap();
             for rect in damage {
                 for y in rect.loc.y..rect.loc.y + rect.size.h {
                     for x in rect.loc.x..rect.loc.x + rect.size.w {
@@ -394,8 +400,8 @@ impl Frame for QueuedFrame {
         let target = self.target.clone();
         let damage = damage.to_vec();
         self.queue.submit(move || {
-            let source_pixels = source.pixels.lock().clone();
-            let mut target_pixels = target.pixels.lock();
+            let source_pixels = source.pixels.lock().unwrap().clone();
+            let mut target_pixels = target.pixels.lock().unwrap();
             for rect in damage {
                 for y in rect.loc.y..rect.loc.y + rect.size.h {
                     for x in rect.loc.x..rect.loc.x + rect.size.w {
@@ -408,7 +414,7 @@ impl Frame for QueuedFrame {
                 }
             }
         });
-        if self.faults.lock().draw {
+        if self.faults.lock().unwrap().draw {
             Err(Failure::Injected)
         } else {
             Ok(())
@@ -422,7 +428,7 @@ impl Frame for QueuedFrame {
         Ok(())
     }
     fn finish(self) -> Result<SyncPoint, Failure> {
-        if self.faults.lock().finish {
+        if self.faults.lock().unwrap().finish {
             Err(Failure::Injected)
         } else {
             Ok(self.queue.fence())
@@ -455,6 +461,7 @@ impl Allocator for TestAllocator {
         let buffer = builder.build().unwrap();
         self.images
             .lock()
+            .unwrap()
             .insert(buffer.clone(), Image::new(buffer.size(), format));
         Ok(buffer)
     }
@@ -632,8 +639,8 @@ fn failed_or_interrupted_wait_retains_fence_and_does_not_rebind() {
         let mut output = output();
         fixture.draw(&mut output, RED, false);
         let faults = fixture.manager.devices[0].renderer.faults.clone();
-        let binds = faults.lock().binds;
-        faults.lock().wait = Some(error);
+        let binds = faults.lock().unwrap().binds;
+        faults.lock().unwrap().wait = Some(error);
         {
             let mut renderer = fixture.renderer();
             let mut fb = renderer.bind(&mut output).unwrap();
@@ -641,9 +648,9 @@ fn failed_or_interrupted_wait_retains_fence_and_does_not_rebind() {
                 matches!(renderer.render(&mut fb, (2, 1).into(), Transform::Normal), Err(Error::Render(e)) if e == error)
             );
         }
-        assert_eq!(faults.lock().binds, binds);
+        assert_eq!(faults.lock().unwrap().binds, binds);
         assert!(matches!(fixture.completion(), CopyCompletion::Pending(sync) if !sync.is_reached()));
-        faults.lock().wait = None;
+        faults.lock().unwrap().wait = None;
         let mut next = output.clone();
         fixture.draw(&mut next, BLUE, false);
         fixture.drain();
@@ -659,8 +666,9 @@ fn copy_errors_and_later_cleanup_errors_retain_reader_fence() {
             .renderer
             .faults
             .lock()
+            .unwrap()
             .cleanup = !draw_error;
-        fixture.manager.devices[1].renderer.faults.lock().draw = draw_error;
+        fixture.manager.devices[1].renderer.faults.lock().unwrap().draw = draw_error;
         let mut first = output();
         {
             let mut renderer = fixture.renderer();
@@ -672,8 +680,8 @@ fn copy_errors_and_later_cleanup_errors_retain_reader_fence() {
             assert!(frame.finish().is_err());
         }
         assert!(matches!(fixture.completion(), CopyCompletion::Pending(_)));
-        fixture.manager.devices[0].renderer.faults.lock().cleanup = false;
-        fixture.manager.devices[1].renderer.faults.lock().draw = false;
+        fixture.manager.devices[0].renderer.faults.lock().unwrap().cleanup = false;
+        fixture.manager.devices[1].renderer.faults.lock().unwrap().draw = false;
         let mut second = output();
         fixture.draw(&mut second, BLUE, false);
         fixture.drain();
@@ -686,7 +694,7 @@ fn copy_errors_and_later_cleanup_errors_retain_reader_fence() {
 fn failed_target_finish_poison_prevents_reuse_including_drop() {
     for drop_frame in [false, true] {
         let mut fixture = Fixture::new(false);
-        fixture.manager.devices[1].renderer.faults.lock().finish = true;
+        fixture.manager.devices[1].renderer.faults.lock().unwrap().finish = true;
         let mut output = output();
         {
             let mut renderer = fixture.renderer();
@@ -702,7 +710,7 @@ fn failed_target_finish_poison_prevents_reuse_including_drop() {
             }
         }
         assert!(matches!(fixture.completion(), CopyCompletion::Unfenced));
-        let binds = fixture.manager.devices[0].renderer.faults.lock().binds;
+        let binds = fixture.manager.devices[0].renderer.faults.lock().unwrap().binds;
         {
             let mut renderer = fixture.renderer();
             let mut fb = renderer.bind(&mut output).unwrap();
@@ -711,7 +719,10 @@ fn failed_target_finish_poison_prevents_reuse_including_drop() {
                 Err(Error::MissingCopyCompletion)
             ));
         }
-        assert_eq!(fixture.manager.devices[0].renderer.faults.lock().binds, binds);
+        assert_eq!(
+            fixture.manager.devices[0].renderer.faults.lock().unwrap().binds,
+            binds
+        );
     }
 }
 
@@ -728,7 +739,7 @@ fn size_and_format_replacement_wait_before_discarding_old_completion() {
             .dmabuf
             .clone();
         let faults = fixture.manager.devices[0].renderer.faults.clone();
-        faults.lock().wait = Some(Failure::Interrupted);
+        faults.lock().unwrap().wait = Some(Failure::Interrupted);
         let mut next = Image::new(size.into(), format);
         {
             let mut renderer = fixture
@@ -745,7 +756,7 @@ fn size_and_format_replacement_wait_before_discarding_old_completion() {
                 .dmabuf,
             old
         );
-        faults.lock().wait = None;
+        faults.lock().unwrap().wait = None;
         {
             let mut renderer = fixture
                 .manager
@@ -784,7 +795,10 @@ fn memory_copy_and_single_gpu_do_not_add_reader_waits() {
         fixture.drain();
         assert_eq!(first.pixel(0), [255, 0, 0, 255]);
         assert_eq!(second.pixel(0), [0, 0, 255, 255]);
-        assert_eq!(fixture.manager.devices[0].renderer.faults.lock().waits, 0);
+        assert_eq!(
+            fixture.manager.devices[0].renderer.faults.lock().unwrap().waits,
+            0
+        );
         if single_gpu {
             assert!(fixture.manager.dmabuf_cache.is_empty());
         } else {
@@ -1045,11 +1059,12 @@ fn failed_shadow_import_preserves_cache_until_dependency_can_be_retried() {
             .create_buffer(2, 1, format, &[Modifier::Linear])
             .unwrap();
         let images = fixture.manager.devices[1].renderer.images.clone();
-        images.lock()[&original]
+        images.lock().unwrap()[&original]
             .pixels
             .lock()
+            .unwrap()
             .copy_from_slice(&[255, 0, 0, 255, 255, 0, 0, 255]);
-        let shadow_image = images.lock()[&shadow].clone();
+        let shadow_image = images.lock().unwrap()[&shadow].clone();
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let texture = MultiTexture::new(
             (2, 1).into(),
@@ -1058,10 +1073,11 @@ fn failed_shadow_import_preserves_cache_until_dependency_can_be_retried() {
                 modifier: Modifier::Linear,
             },
         );
-        texture.0.lock().format = Some(format);
+        texture.0.lock().unwrap().format = Some(format);
         texture
             .0
             .lock()
+            .unwrap()
             .textures
             .entry(TypeId::of::<TestApi>())
             .or_default()
@@ -1079,7 +1095,7 @@ fn failed_shadow_import_preserves_cache_until_dependency_can_be_retried() {
                     ),
                 },
             );
-        fixture.manager.devices[1].renderer.faults.lock().wait = Some(Failure::Injected);
+        fixture.manager.devices[1].renderer.faults.lock().unwrap().wait = Some(Failure::Injected);
         {
             let mut renderer = if destination_device {
                 fixture.renderer()
@@ -1091,7 +1107,7 @@ fn failed_shadow_import_preserves_cache_until_dependency_can_be_retried() {
                 .is_err());
         }
         {
-            let cached = texture.0.lock();
+            let cached = texture.0.lock().unwrap();
             assert!(
                 matches!(
                     cached.textures[&TypeId::of::<TestApi>()].get(&fixture.source),
@@ -1102,8 +1118,11 @@ fn failed_shadow_import_preserves_cache_until_dependency_can_be_retried() {
             );
         }
         assert_eq!(attempts.load(SeqCst), 1);
-        assert_eq!(fixture.manager.devices[1].renderer.faults.lock().binds, 0);
-        fixture.manager.devices[1].renderer.faults.lock().wait = None;
+        assert_eq!(
+            fixture.manager.devices[1].renderer.faults.lock().unwrap().binds,
+            0
+        );
+        fixture.manager.devices[1].renderer.faults.lock().unwrap().wait = None;
         {
             let mut renderer = if destination_device {
                 fixture.renderer()
@@ -1123,7 +1142,7 @@ fn failed_shadow_import_preserves_cache_until_dependency_can_be_retried() {
             2,
             "retry must complete the retained dependency"
         );
-        let cached = texture.0.lock();
+        let cached = texture.0.lock().unwrap();
         assert!(
             matches!(&cached.textures[&TypeId::of::<TestApi>()][&fixture.source],
                 GpuSingleTexture::Dma { dmabuf, .. } if dmabuf == &shadow),
@@ -1145,7 +1164,7 @@ fn failed_internal_restart_keeps_copy_fence_and_does_not_open_source_frame() {
             .render(&mut fb, (2, 1).into(), Transform::Normal)
             .unwrap();
         frame.clear(RED, &[Rectangle::from_size((2, 1).into())]).unwrap();
-        faults.lock().wait = Some(Failure::Interrupted);
+        faults.lock().unwrap().wait = Some(Failure::Interrupted);
         assert!(matches!(
             frame.flush_frame(),
             Err(Error::Render(Failure::Interrupted))
@@ -1160,7 +1179,7 @@ fn failed_internal_restart_keeps_copy_fence_and_does_not_open_source_frame() {
         ));
     }
     assert!(matches!(fixture.completion(), CopyCompletion::Pending(_)));
-    faults.lock().wait = None;
+    faults.lock().unwrap().wait = None;
     let mut second = output();
     fixture.draw(&mut second, BLUE, false);
     fixture.drain();

@@ -103,7 +103,7 @@ unsafe fn publish_sync(gl: &Gles2, fencing: bool) -> Option<ffi::types::GLsync> 
 impl TextureSync {
     pub(super) fn wait_for_upload(&self, gl: &Gles2) {
         unsafe {
-            wait_for_syncpoint(&mut self.write_sync.lock(), gl);
+            wait_for_syncpoint(&mut self.write_sync.lock().unwrap(), gl);
         }
     }
 
@@ -111,7 +111,7 @@ impl TextureSync {
         if !shared {
             return;
         }
-        let mut read_sync = self.read_sync.lock();
+        let mut read_sync = self.read_sync.lock().unwrap();
         if let Some(old) = read_sync.take() {
             unsafe {
                 gl.WaitSync(old, 0, ffi::TIMEOUT_IGNORED);
@@ -123,8 +123,8 @@ impl TextureSync {
 
     pub(super) fn wait_for_all(&mut self, gl: &Gles2) {
         unsafe {
-            wait_for_syncpoint(self.read_sync.get_mut(), gl);
-            wait_for_syncpoint(self.write_sync.get_mut(), gl);
+            wait_for_syncpoint(self.read_sync.get_mut().unwrap(), gl);
+            wait_for_syncpoint(self.write_sync.get_mut().unwrap(), gl);
         }
     }
 
@@ -132,7 +132,7 @@ impl TextureSync {
         if !shared {
             return;
         }
-        let write_sync = self.write_sync.get_mut();
+        let write_sync = self.write_sync.get_mut().unwrap();
         if let Some(old) = write_sync.take() {
             unsafe {
                 gl.WaitSync(old, 0, ffi::TIMEOUT_IGNORED);
@@ -164,13 +164,13 @@ impl Drop for GlesTextureInternal {
         let _ = self
             .destruction_callback_sender
             .send(CleanupResource::Texture(self.texture));
-        let mut sync = self.sync.write();
-        if let Some(sync) = sync.read_sync.get_mut().take() {
+        let mut sync = self.sync.write().unwrap();
+        if let Some(sync) = sync.read_sync.get_mut().unwrap().take() {
             let _ = self
                 .destruction_callback_sender
                 .send(CleanupResource::Sync(sync as *const _));
         }
-        if let Some(sync) = sync.write_sync.get_mut().take() {
+        if let Some(sync) = sync.write_sync.get_mut().unwrap().take() {
             let _ = self
                 .destruction_callback_sender
                 .send(CleanupResource::Sync(sync as *const _));
@@ -439,7 +439,7 @@ mod tests {
         sync.wait_for_upload(&gl);
         command(2, Command::Read(3));
         sync.update_read(&gl, true, true);
-        assert!(sync.read_sync.lock().is_none());
+        assert!(sync.read_sync.lock().unwrap().is_none());
         DRIVER.with_borrow(|driver| {
             for queue in &driver.queues {
                 assert_eq!(queue.completed, queue.commands.len());
@@ -455,10 +455,10 @@ mod tests {
             let mut sync = TextureSync::default();
             command(0, Command::Write(7));
             sync.update_write(&gl, true, fencing);
-            assert!(sync.write_sync.lock().is_none());
+            assert!(sync.write_sync.lock().unwrap().is_none());
             command(1, Command::Read(7));
             sync.update_read(&gl, true, fencing);
-            assert!(sync.read_sync.lock().is_none());
+            assert!(sync.read_sync.lock().unwrap().is_none());
             DRIVER.with_borrow(|driver| {
                 assert_eq!(driver.finishes, 2);
                 assert_eq!(driver.fence_calls, if fencing { 2 } else { 0 });

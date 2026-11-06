@@ -40,12 +40,11 @@
 //! reduces the amount of necessary setup operations.
 //!
 use aliasable::boxed::AliasableBox;
-use parking_lot::Mutex;
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
     fmt,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use super::{
@@ -646,7 +645,7 @@ impl<A: GraphicsApi> GpuManager<A> {
                 let src_node = import_on_src_node(dmabuf, Some(damage), &mut texture, first, None, devices)?;
 
                 if src_node != target_node {
-                    let mut texture_internal = texture.0.lock();
+                    let mut texture_internal = texture.0.lock().unwrap();
                     let api_textures = texture_internal.textures.get_mut(&TypeId::of::<A>()).unwrap();
 
                     {
@@ -1750,7 +1749,7 @@ impl MultiTexture {
                 }))
             });
         {
-            let mut internal = internal.lock();
+            let mut internal = internal.lock().unwrap();
             if internal.size != size || internal.buffer_format != buffer_format {
                 internal.textures.clear();
                 internal.format = None;
@@ -1783,7 +1782,7 @@ impl MultiTexture {
     where
         <<A::Device as ApiDevice>::Renderer as RendererSuper>::TextureId: Clone + Send + 'static,
     {
-        let tex = self.0.lock();
+        let tex = self.0.lock().unwrap();
         tex.textures
             .get(&TypeId::of::<A>())
             .and_then(|textures| textures.get(render))
@@ -1808,7 +1807,7 @@ impl MultiTexture {
     where
         <<A::Device as ApiDevice>::Renderer as RendererSuper>::TextureId: 'static,
     {
-        let mut tex = self.0.lock();
+        let mut tex = self.0.lock().unwrap();
         if let Some(GpuSingleTexture::Dma { sync, .. }) = tex
             .textures
             .get_mut(&TypeId::of::<A>())
@@ -1826,7 +1825,7 @@ impl MultiTexture {
     ) where
         <<A::Device as ApiDevice>::Renderer as RendererSuper>::TextureId: 'static,
     {
-        let mut tex = self.0.lock();
+        let mut tex = self.0.lock().unwrap();
         let format = texture.format();
         if format != tex.format && !tex.textures.is_empty() {
             warn!(has = ?tex.format, got = ?format, "Multi-SubTexture with wrong format!");
@@ -1864,7 +1863,7 @@ impl MultiTexture {
         <T::Device as ApiDevice>::Renderer: ExportMem,
         <<T::Device as ApiDevice>::Renderer as ExportMem>::TextureMapping: 'static,
     {
-        let mut tex_ref = self.0.lock();
+        let mut tex_ref = self.0.lock().unwrap();
         let tex = &mut *tex_ref;
 
         let textures = tex.textures.entry(TypeId::of::<R>()).or_default();
@@ -1925,16 +1924,16 @@ impl MultiTexture {
 
 impl Texture for MultiTexture {
     fn size(&self) -> Size<i32, BufferCoords> {
-        self.0.lock().size
+        self.0.lock().unwrap().size
     }
     fn width(&self) -> u32 {
-        self.0.lock().size.w as u32
+        self.0.lock().unwrap().size.w as u32
     }
     fn height(&self) -> u32 {
-        self.0.lock().size.h as u32
+        self.0.lock().unwrap().size.h as u32
     }
     fn format(&self) -> Option<Fourcc> {
-        self.0.lock().format
+        self.0.lock().unwrap().format
     }
 }
 
@@ -2024,7 +2023,7 @@ where
                 "Failed to render texture {:?}, import for wrong devices {:?}? {:?}",
                 Arc::as_ptr(&texture.0),
                 self.node,
-                texture.0.lock(),
+                texture.0.lock().unwrap(),
             );
             Ok(())
         }
@@ -2750,7 +2749,7 @@ where
                 .as_ref()
                 .is_some_and(|target| src_node == *target.device.node())
             {
-                let mut texture_internal = texture.0.lock();
+                let mut texture_internal = texture.0.lock().unwrap();
                 // make sure our target exists
                 texture_internal.textures.entry(TypeId::of::<R>()).or_default();
 
@@ -2801,7 +2800,7 @@ where
                 .iter_mut()
                 .find(|other| src_node == *other.node())
             {
-                let mut texture_internal = texture.0.lock();
+                let mut texture_internal = texture.0.lock().unwrap();
                 let api_textures = texture_internal.textures.get_mut(&TypeId::of::<R>()).unwrap();
                 let mut target_texture = api_textures.remove(self.render.node());
                 let src_texture = match api_textures.get(&src_node).unwrap() {

@@ -2,7 +2,6 @@
 
 use cgmath::{prelude::*, Matrix3, Vector2};
 use core::slice;
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
@@ -15,7 +14,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicPtr, Ordering},
         mpsc::{channel, Receiver, Sender},
-        Arc,
+        Arc, Mutex, RwLock, RwLockWriteGuard,
     },
 };
 use tracing::{debug, error, info, info_span, instrument, span, span::EnteredSpan, trace, warn, Level};
@@ -657,7 +656,7 @@ impl GlesRenderer {
         }
 
         let bind = || {
-            let mut sync_lock = texture.0.sync.write();
+            let mut sync_lock = texture.0.sync.write().unwrap();
             let mut fbo = 0;
             unsafe {
                 sync_lock.wait_for_all(&self.gl);
@@ -782,6 +781,7 @@ impl ImportMemWl for GlesRenderer {
                 .data_map
                 .get_or_insert_threadsafe(|| Arc::new(Mutex::new(CacheMap::new())))
                 .lock()
+                .unwrap()
         });
 
         with_buffer_contents(buffer, |ptr, len, data| {
@@ -853,7 +853,7 @@ impl ImportMemWl for GlesRenderer {
                     }),
             );
 
-            let mut sync_lock = texture.0.sync.write();
+            let mut sync_lock = texture.0.sync.write().unwrap();
             unsafe {
                 sync_lock.wait_for_all(&self.gl);
                 self.gl.BindTexture(ffi::TEXTURE_2D, texture.0.texture);
@@ -1037,7 +1037,7 @@ impl ImportMem for GlesRenderer {
             return Err(GlesError::UnexpectedSize);
         }
 
-        let mut sync_lock = texture.0.sync.write();
+        let mut sync_lock = texture.0.sync.write().unwrap();
         unsafe {
             self.egl.make_current()?;
             sync_lock.wait_for_all(&self.gl);
@@ -1236,7 +1236,7 @@ impl GlesRenderer {
                 return Ok(None);
             }
             let tex = Some(texture.0.texture);
-            let mut sync = texture.0.sync.write();
+            let mut sync = texture.0.sync.write().unwrap();
             unsafe {
                 self.egl.make_current()?;
             }
@@ -2759,7 +2759,7 @@ impl GlesFrame<'_, '_> {
 
         // render
         let gl = &self.renderer.gl;
-        let sync_lock = tex.0.sync.read();
+        let sync_lock = tex.0.sync.read().unwrap();
         unsafe {
             sync_lock.wait_for_upload(gl);
             gl.ActiveTexture(ffi::TEXTURE0);
