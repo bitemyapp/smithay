@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- `multigpu::Error` gains `MissingCopyCompletion` and `FrameAborted`.
+- `EGLContext::is_shared` stays true once a context has been shared, even after
+  all of its siblings are dropped.
+
 ### Rendering synchronization
 
 - Omit per-texture GL fences only while an EGL context has never shared its
@@ -17,6 +23,9 @@
   as context loss; recreate the affected renderer/manager.
 - Preserve an imported DMA shadow and its pending fence when both GPU waiting
   and the CPU fallback fail. Interrupted CPU waits are not completion.
+- A `MultiFrame` whose internal restart (for example in a blit) failed now
+  returns `Error::FrameAborted` from later calls instead of panicking, and never
+  resumes drawing. Drop it and render a new frame.
 - Add `MultiFrame::damage` for drawing through the underlying frame. Register
   exactly the reconstructed physical rectangles: the intermediate buffer is
   shared across targets and does not retain each target's undamaged pixels.

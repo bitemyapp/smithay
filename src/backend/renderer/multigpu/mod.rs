@@ -203,6 +203,13 @@ where
     /// without a completion fence could overwrite memory still read by the target.
     #[error("The intermediate buffer has an unfenced target copy")]
     MissingCopyCompletion,
+    /// The frame was aborted by an earlier error and cannot be drawn to.
+    ///
+    /// This happens when restarting the underlying frame after an internal copy (for
+    /// example in a blit) fails. Its earlier contents may not have reached the target;
+    /// drop the frame and render a new one.
+    #[error("The frame was aborted by an earlier error")]
+    FrameAborted,
 }
 
 impl<R: GraphicsApi, T: GraphicsApi> Error<R, T> {
@@ -218,6 +225,7 @@ impl<R: GraphicsApi, T: GraphicsApi> Error<R, T> {
             Error::ImportFailed => Error::ImportFailed,
             Error::AllocatorError(a) => Error::AllocatorError(a),
             Error::MissingCopyCompletion => Error::MissingCopyCompletion,
+            Error::FrameAborted => Error::FrameAborted,
         }
     }
 }
@@ -235,6 +243,7 @@ impl<R: GraphicsApi> Error<R, R> {
             Error::ImportFailed => Error::ImportFailed,
             Error::AllocatorError(a) => Error::AllocatorError(a),
             Error::MissingCopyCompletion => Error::MissingCopyCompletion,
+            Error::FrameAborted => Error::FrameAborted,
         }
     }
 }
@@ -258,6 +267,7 @@ where
             Error::ImportFailed => write!(f, "Error::ImportFailed"),
             Error::AllocatorError(err) => write!(f, "Error::AllocationError({})", err),
             Error::MissingCopyCompletion => write!(f, "Error::MissingCopyCompletion"),
+            Error::FrameAborted => write!(f, "Error::FrameAborted"),
         }
     }
 }
@@ -276,7 +286,7 @@ where
             | x @ Error::DeviceMissing
             | x @ Error::AllocatorError(_)
             | x @ Error::MissingCopyCompletion => SwapBuffersError::ContextLost(Box::new(x)),
-            x @ Error::MismatchedDevice(_) | x @ Error::ImportFailed => {
+            x @ Error::MismatchedDevice(_) | x @ Error::ImportFailed | x @ Error::FrameAborted => {
                 SwapBuffersError::TemporaryFailure(Box::new(x))
             }
             Error::RenderApiError(x) => x.into(),
@@ -908,7 +918,9 @@ where
     <<T::Device as ApiDevice>::Renderer as RendererSuper>::Error: 'static,
 {
     node: DrmNode,
+    context_id: ContextId<MultiTexture>,
 
+    // Only `None` after an internal restart failed: the frame is then aborted.
     frame: Option<<<R::Device as ApiDevice>::Renderer as RendererSuper>::Frame<'frame, 'buffer>>,
     framebuffer:
         Option<AliasableBox<<<R::Device as ApiDevice>::Renderer as RendererSuper>::Framebuffer<'frame>>>,
@@ -1006,7 +1018,9 @@ where
     <<T::Device as ApiDevice>::Renderer as RendererSuper>::Error: 'static,
 {
     fn as_ref(&self) -> &<<R::Device as ApiDevice>::Renderer as RendererSuper>::Frame<'frame, 'buffer> {
-        self.frame.as_ref().unwrap()
+        self.frame
+            .as_ref()
+            .expect("MultiFrame was aborted by an earlier error")
     }
 }
 
@@ -1026,7 +1040,9 @@ where
     fn as_mut(
         &mut self,
     ) -> &mut <<R::Device as ApiDevice>::Renderer as RendererSuper>::Frame<'frame, 'buffer> {
-        self.frame.as_mut().unwrap()
+        self.frame
+            .as_mut()
+            .expect("MultiFrame was aborted by an earlier error")
     }
 }
 
@@ -1341,6 +1357,7 @@ where
 
         Ok(MultiFrame {
             node,
+            context_id: frame.context_id().map(),
             frame: Some(frame),
             framebuffer: new_framebuffer,
             render: ptr, // this is fine, as long as we have the frame, this ptr is valid
@@ -1458,7 +1475,19 @@ where
         self.damage.extend_from_slice(damage);
     }
 
+    fn frame_mut(
+        &mut self,
+    ) -> Result<&mut <<R::Device as ApiDevice>::Renderer as RendererSuper>::Frame<'frame, 'buffer>, Error<R, T>>
+    {
+        self.frame.as_mut().ok_or(Error::FrameAborted)
+    }
+
     fn flush_frame(&mut self) -> Result<(), Error<R, T>> {
+        // A failed restart left nothing to draw into, and its damage may not have reached
+        // the target. Never resume such a frame as if it had.
+        if self.frame.is_none() {
+            return Err(Error::FrameAborted);
+        }
         if self.target.is_some() {
             let _ = self.finish_internal()?;
             // now the frame is gone, lets use our unholy ptr till the end of this call:
@@ -1952,18 +1981,14 @@ where
     type TextureId = MultiTexture;
 
     fn context_id(&self) -> ContextId<MultiTexture> {
-        self.frame.as_ref().unwrap().context_id().map()
+        self.context_id.clone()
     }
 
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     #[profiling::function]
     fn clear(&mut self, color: Color32F, at: &[Rectangle<i32, Physical>]) -> Result<(), Error<R, T>> {
         self.damage.extend(at);
-        self.frame
-            .as_mut()
-            .unwrap()
-            .clear(color, at)
-            .map_err(Error::Render)
+        self.frame_mut()?.clear(color, at).map_err(Error::Render)
     }
 
     #[instrument(level = "trace", parent = &self.span, skip(self))]
@@ -1978,9 +2003,7 @@ where
             rect.loc += dst.loc;
             rect
         }));
-        self.frame
-            .as_mut()
-            .unwrap()
+        self.frame_mut()?
             .draw_solid(dst, damage, color)
             .map_err(Error::Render)
     }
@@ -1998,16 +2021,15 @@ where
         alpha: f32,
     ) -> Result<(), Error<R, T>> {
         if let Some(render_texture) = texture.get::<R>(&self.node) {
+            let frame = self.frame.as_mut().ok_or(Error::FrameAborted)?;
             texture
-                .synchronize::<R>(&self.node, |sync| self.frame.as_mut().unwrap().wait(sync))
+                .synchronize::<R>(&self.node, |sync| frame.wait(sync))
                 .map_err(Error::Render)?;
             self.damage.extend(damage.iter().copied().map(|mut rect| {
                 rect.loc += dst.loc;
                 rect
             }));
-            self.frame
-                .as_mut()
-                .unwrap()
+            frame
                 .render_texture_from_to(
                     &render_texture,
                     src,
@@ -2030,16 +2052,20 @@ where
     }
 
     fn transformation(&self) -> Transform {
-        self.frame.as_ref().unwrap().transformation()
+        // The underlying frame is always created with the destination transform.
+        self.dst_transform
     }
 
     #[profiling::function]
     fn wait(&mut self, sync: &sync::SyncPoint) -> Result<(), Self::Error> {
-        self.frame.as_mut().unwrap().wait(sync).map_err(Error::Render)
+        self.frame_mut()?.wait(sync).map_err(Error::Render)
     }
 
     #[profiling::function]
     fn finish(mut self) -> Result<sync::SyncPoint, Self::Error> {
+        if self.frame.is_none() {
+            return Err(Error::FrameAborted);
+        }
         self.finish_internal()
     }
 }

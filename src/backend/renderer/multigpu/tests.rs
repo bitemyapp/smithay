@@ -1177,9 +1177,20 @@ fn failed_internal_restart_keeps_copy_fence_and_does_not_open_source_frame() {
             &*frame.target.as_ref().unwrap().copy_completion,
             CopyCompletion::Pending(_)
         ));
+        // The aborted frame reports errors instead of panicking, and a later restart
+        // must not revive it even once waiting would succeed.
+        faults.lock().unwrap().wait = None;
+        assert!(matches!(
+            frame.clear(BLUE, &[Rectangle::from_size((2, 1).into())]),
+            Err(Error::FrameAborted)
+        ));
+        assert_eq!(frame.transformation(), Transform::Normal);
+        let _ = frame.context_id();
+        assert!(matches!(frame.flush_frame(), Err(Error::FrameAborted)));
+        assert!(frame.frame.is_none());
+        assert!(matches!(frame.finish(), Err(Error::FrameAborted)));
     }
     assert!(matches!(fixture.completion(), CopyCompletion::Pending(_)));
-    faults.lock().unwrap().wait = None;
     let mut second = output();
     fixture.draw(&mut second, BLUE, false);
     fixture.drain();
