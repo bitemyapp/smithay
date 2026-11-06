@@ -1,7 +1,10 @@
 //! EGL context related structs
 use std::{
     os::raw::c_int,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use libc::c_void;
@@ -21,15 +24,28 @@ use crate::{
 use tracing::{info, info_span, instrument, trace, warn};
 
 /// EGL context for rendering
+///
+/// Creating the first shared context completes commands queued by the original
+/// context before exposing the new one. The calling thread's current context and
+/// read/draw surfaces are preserved on success. An unbound source must support
+/// being made current without surfaces for this synchronization, and the OpenGL
+/// ES client API must remain bound as set by [`EGLDisplay`] initialization.
 #[derive(Debug)]
 pub struct EGLContext {
     context: ffi::egl::types::EGLContext,
     display: EGLDisplay,
     config_id: ffi::egl::types::EGLConfig,
     pixel_format: Option<PixelFormat>,
-    user_data: Arc<UserDataMap>,
+    user_data: Arc<ContextUserData>,
     externally_managed: bool,
     pub(crate) span: tracing::Span,
+}
+
+#[derive(Debug, Default)]
+struct ContextUserData {
+    data: UserDataMap,
+    // Once shared, queued accesses can outlive the other context.
+    shared: AtomicBool,
 }
 
 /// Defines the priority for an [`EGLContext`]
@@ -109,7 +125,7 @@ impl EGLContext {
             display,
             config_id,
             pixel_format: Some(pixel_format),
-            user_data: Arc::new(UserDataMap::default()),
+            user_data: Arc::new(ContextUserData::default()),
             externally_managed: true,
             span,
         })
@@ -289,6 +305,10 @@ impl EGLContext {
 
         context_attributes.push(ffi::egl::NONE as i32);
 
+        if let Some(shared) = shared.filter(|context| !context.is_shared()) {
+            shared.finish_before_sharing().map_err(Error::CreationFailed)?;
+        }
+
         trace!("Creating EGL context...");
         let context = wrap_egl_call_ptr(|| unsafe {
             ffi::egl::CreateContext(
@@ -336,6 +356,10 @@ impl EGLContext {
 
         info!(priority = ?context_priority, "EGL context created");
 
+        if let Some(shared) = shared {
+            shared.user_data.shared.store(true, Ordering::Release);
+        }
+
         drop(_guard);
         Ok(EGLContext {
             context,
@@ -345,11 +369,76 @@ impl EGLContext {
             user_data: if let Some(shared) = shared {
                 shared.user_data.clone()
             } else {
-                Arc::new(UserDataMap::default())
+                Arc::new(ContextUserData::default())
             },
             externally_managed: false,
             span,
         })
+    }
+
+    // EGLContext is !Sync. Its Send contract requires it to be unbound before moving
+    // threads, so a legitimately borrowed source cannot be current on another thread.
+    // No sibling is exposed until both completion and restoration have succeeded.
+    fn finish_before_sharing(&self) -> Result<(), EGLError> {
+        unsafe {
+            // Current-context queries refer to the bound client API.
+            // Do not accidentally synchronize a different API after external code
+            // changed the binding established by EGLDisplay initialization.
+            if ffi::egl::QueryAPI() != ffi::egl::OPENGL_ES_API {
+                return Err(EGLError::BadMatch);
+            }
+            let finish = || {
+                // eglWaitClient may reject a surfaceless context (Mesa returns
+                // EGL_BAD_CURRENT_SURFACE). glFinish also works without a surface
+                // and is available in every GLES version.
+                let function = ffi::egl::GetProcAddress(c"glFinish".as_ptr());
+                if function.is_null() {
+                    return Err(EGLError::BadAccess);
+                }
+                let function: unsafe extern "system" fn() = std::mem::transmute(function);
+                function();
+                Ok(())
+            };
+            if self.is_current() {
+                return finish();
+            }
+
+            let display = ffi::egl::GetCurrentDisplay();
+            let context = ffi::egl::GetCurrentContext();
+            let draw = ffi::egl::GetCurrentSurface(ffi::egl::DRAW as i32);
+            let read = ffi::egl::GetCurrentSurface(ffi::egl::READ as i32);
+            let source_display = **self.display.get_display_handle();
+            wrap_egl_call_bool(|| {
+                ffi::egl::MakeCurrent(
+                    source_display,
+                    ffi::egl::NO_SURFACE,
+                    ffi::egl::NO_SURFACE,
+                    self.context,
+                )
+            })?;
+            let completion = finish();
+            let restoration = wrap_egl_call_bool(|| {
+                ffi::egl::MakeCurrent(
+                    if context == ffi::egl::NO_CONTEXT {
+                        source_display
+                    } else {
+                        display
+                    },
+                    draw,
+                    read,
+                    context,
+                )
+            });
+            if let Err(err) = restoration {
+                // Do not leave an originally unbound, Send context current after
+                // returning an error. Aborting is necessary if EGL cannot release it.
+                if self.unbind().is_err() {
+                    std::process::abort();
+                }
+                return Err(err);
+            }
+            completion
+        }
     }
 
     /// Makes the OpenGL context the current context in the current thread with no surface bound.
@@ -420,10 +509,12 @@ impl EGLContext {
 
     /// Returns true if the OpenGL context is (possibly) shared with another.
     ///
+    /// Once shared, a context remains shared even after its siblings are dropped:
+    /// their submitted work and shared objects can still be alive.
     /// Externally managed contexts created with `EGLContext::from_raw`
     /// are always considered shared by this function.
     pub fn is_shared(&self) -> bool {
-        self.externally_managed || Arc::strong_count(&self.user_data) > 1
+        self.externally_managed || self.user_data.shared.load(Ordering::Acquire)
     }
 
     /// Returns the egl config for this context
@@ -475,7 +566,7 @@ impl EGLContext {
     /// *Note:* UserData is shared between shared context, if constructed with
     /// [`new_shared`](EGLContext::new_shared) or [`new_shared_with_config`](EGLContext::new_shared_with_config).
     pub fn user_data(&self) -> &UserDataMap {
-        &self.user_data
+        &self.user_data.data
     }
 
     /// Get a raw handle to the underlying context.

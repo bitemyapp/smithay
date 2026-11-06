@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Rendering synchronization
+
+- Omit per-texture GL fences only while an EGL context has never shared its
+  resources. First sharing completes previously unfenced GLES work and restores
+  the caller's current context and read/draw surfaces. Sharing remains recorded
+  after sibling contexts are destroyed.
+- Publish shared texture reads and writes with flushed fences, or complete them
+  synchronously when fencing is unavailable. Render-to-texture, imports, updates,
+  blits and readbacks participate; frame/native fence export remains enabled.
+- Keep the last cross-GPU target-copy fence with the cached intermediate DMA-BUF,
+  including frame drop, internal frame restart and failed waits. Target finish
+  failure prevents unsafe reuse with `Error::MissingCopyCompletion`, classified
+  as context loss; recreate the affected renderer/manager.
+- Preserve an imported DMA shadow and its pending fence when both GPU waiting
+  and the CPU fallback fail. Interrupted CPU waits are not completion.
+- Add `MultiFrame::damage` for drawing through the underlying frame. Register
+  exactly the reconstructed physical rectangles: the intermediate buffer is
+  shared across targets and does not retain each target's undamaged pixels.
+
+Renderer regressions include deterministic delayed-reader/error tests and
+explicitly ignored real EGL and two-render-node GPU checks. The latter need no
+DRM master or display: `SMITHAY_TEST_RENDER_NODE` and `SMITHAY_TEST_TARGET_NODE`
+select the devices. `SMITHAY_TEST_EGL_DEVICE` selects an enumerated EGL device;
+without it, the context checks use Mesa surfaceless. Repeat the Mesa checks with
+`MESA_GLES_VERSION_OVERRIDE=2.0` for GLES2 completion.
+
 ## 0.7.0
 
 ### Breaking changes
