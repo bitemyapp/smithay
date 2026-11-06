@@ -118,7 +118,8 @@ impl CopyCompletion {
             Self::Pending(sync) => wait(sync)?,
             Self::Unfenced => return Err(unfenced()),
         }
-        // A successful renderer wait orders subsequent writes; it need not CPU-wait.
+        // A successful renderer wait orders subsequent writes (see `Renderer::wait`);
+        // it need not CPU-wait.
         // On failure the dependency remains owned here, including across retries.
         *self = Self::Idle;
         Ok(())
@@ -1471,6 +1472,9 @@ where
     ///
     /// This does not draw or synchronize. It ensures raw rendering (for example
     /// through `GlesFrame::with_context`) is included in the eventual target copy.
+    ///
+    /// Raw GL commands such as `glScissor` use framebuffer coordinates. Unless the
+    /// destination transform is [`Transform::Normal`], convert them to frame coordinates.
     pub fn damage(&mut self, damage: &[Rectangle<i32, Physical>]) {
         self.damage.extend_from_slice(damage);
     }
@@ -1804,6 +1808,10 @@ impl MultiTexture {
     ///
     /// - No textures are available for the Renderer type `A``
     /// - No texture of type `T` is available for the given `DrmNode`
+    ///
+    /// The returned texture may be a copy from another device that is still being written.
+    /// Drawing it through the [`MultiFrame`] waits for that copy; using it directly (for
+    /// example through `AsMut` or `GlesFrame::with_context`) does not.
     pub fn get<A: GraphicsApi + 'static>(
         &self,
         render: &DrmNode,

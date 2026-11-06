@@ -1862,6 +1862,9 @@ impl GlesRenderer {
     /// or check the source code of the version of Smithay you are using to ensure
     /// your changes don't interfere with the renderer's behavior.
     /// Doing otherwise can lead to rendering errors while using other functions of this renderer.
+    ///
+    /// Accesses to [`GlesTexture`]s made here are not tracked by the renderer's texture
+    /// synchronization. If the context is shared, order them against other contexts yourself.
     #[instrument(level = "trace", parent = &self.span, skip_all)]
     pub fn with_context<F, R>(&mut self, func: F) -> Result<R, GlesError>
     where
@@ -2052,6 +2055,9 @@ impl GlesFrame<'_, '_> {
     /// or check the source code of the version of Smithay you are using to ensure
     /// your changes don't interfere with the renderer's behavior.
     /// Doing otherwise can lead to rendering errors while using other functions of this renderer.
+    ///
+    /// Accesses to [`GlesTexture`]s made here are not tracked by the renderer's texture
+    /// synchronization. If the context is shared, order them against other contexts yourself.
     #[instrument(level = "trace", parent = &self.span, skip_all)]
     pub fn with_context<F, R>(&mut self, func: F) -> Result<R, GlesError>
     where

@@ -29,6 +29,9 @@
 - Add `MultiFrame::damage` for drawing through the underlying frame. Register
   exactly the reconstructed physical rectangles: the intermediate buffer is
   shared across targets and does not retain each target's undamaged pixels.
+- Document that a successful `Renderer::wait` or `Frame::wait` orders later work
+  after the sync point; multi-GPU buffer reuse relies on it. Raw GL access
+  (`with_context`, `MultiTexture::get`) bypasses texture synchronization.
 
 Renderer regressions include deterministic delayed-reader/error tests and
 explicitly ignored real EGL and two-render-node GPU checks. The latter need no

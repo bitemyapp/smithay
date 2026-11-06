@@ -343,6 +343,9 @@ pub trait Frame {
     fn transformation(&self) -> Transform;
 
     /// Wait for a [`SyncPoint`](sync::SyncPoint) to be signaled
+    ///
+    /// On success, the frame's subsequent operations are ordered after `sync`, either
+    /// by a GPU-side wait or because this call blocked until `sync` was reached.
     fn wait(&mut self, sync: &sync::SyncPoint) -> Result<(), Self::Error>;
 
     /// Finish this [`Frame`] returning any error that may happen during any cleanup.
@@ -420,6 +423,11 @@ pub trait Renderer: RendererSuper {
         'buffer: 'frame;
 
     /// Wait for a [`SyncPoint`](sync::SyncPoint) to be signaled
+    ///
+    /// On success, work subsequently submitted through this renderer is ordered after
+    /// `sync`, either by a GPU-side wait or because this call blocked until `sync` was
+    /// reached. Multi-GPU rendering relies on this to reuse a buffer that another
+    /// device may still be reading.
     fn wait(&mut self, sync: &sync::SyncPoint) -> Result<(), Self::Error>;
 
     /// Forcibly clean up the renderer internal texture cache
