@@ -223,12 +223,12 @@ impl Renderer for QueuedRenderer {
     }
 }
 impl Bind<Image> for QueuedRenderer {
-    fn bind<'a>(&mut self, target: &'a mut Image) -> Result<Image, Failure> {
+    fn bind(&mut self, target: &mut Image) -> Result<Image, Failure> {
         Ok(target.clone())
     }
 }
 impl Bind<Dmabuf> for QueuedRenderer {
-    fn bind<'a>(&mut self, target: &'a mut Dmabuf) -> Result<Image, Failure> {
+    fn bind(&mut self, target: &mut Dmabuf) -> Result<Image, Failure> {
         self.faults.lock().unwrap().binds += 1;
         self.images
             .lock()
@@ -507,21 +507,24 @@ struct Fixture {
 }
 impl Fixture {
     fn new(cpu_copy: bool) -> Self {
-        let nodes: Vec<_> = std::fs::read_dir("/dev/dri")
-            .expect("requires DRM render node identities")
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
-            .filter_map(|entry| DrmNode::from_path(entry.path()).ok())
-            .collect();
+        // Only look for render nodes if the environment does not select both.
+        let discovered = || -> Vec<DrmNode> {
+            std::fs::read_dir("/dev/dri")
+                .expect("requires DRM render node identities")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
+                .filter_map(|entry| DrmNode::from_path(entry.path()).ok())
+                .collect()
+        };
         let source = std::env::var("SMITHAY_TEST_RENDER_NODE")
             .ok()
             .map(|path| DrmNode::from_path(path).unwrap())
-            .or_else(|| nodes.first().copied())
+            .or_else(|| discovered().first().copied())
             .expect("requires a source DRM identity");
         let target = std::env::var("SMITHAY_TEST_TARGET_NODE")
             .ok()
             .map(|path| DrmNode::from_path(path).unwrap())
-            .or_else(|| nodes.iter().copied().find(|node| *node != source))
+            .or_else(|| discovered().into_iter().find(|node| *node != source))
             .expect("requires a second DRM identity");
         assert_ne!(source, target);
         let images = Images::default();
@@ -651,9 +654,12 @@ fn failed_or_interrupted_wait_retains_fence_and_does_not_rebind() {
         assert_eq!(faults.lock().unwrap().binds, binds);
         assert!(matches!(fixture.completion(), CopyCompletion::Pending(sync) if !sync.is_reached()));
         faults.lock().unwrap().wait = None;
-        let mut next = output.clone();
-        fixture.draw(&mut next, BLUE, false);
+        // The retry must still order the first copy before the next producer write.
+        let mut second = self::output();
+        fixture.draw(&mut second, BLUE, false);
         fixture.drain();
+        assert_eq!(output.pixel(0), [255, 0, 0, 255]);
+        assert_eq!(second.pixel(0), [0, 0, 255, 255]);
     }
 }
 
@@ -775,6 +781,8 @@ fn size_and_format_replacement_wait_before_discarding_old_completion() {
             old
         );
         fixture.drain();
+        // Only the allocation identities above discriminate: `next` is drawn into a
+        // new allocation, so these pixels hold even if the old copy were not waited for.
         assert_eq!(first.pixel(0), [255, 0, 0, 255]);
         assert_eq!(next.pixel(0), [0, 0, 255, 255]);
     }

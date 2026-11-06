@@ -284,6 +284,9 @@ mod tests {
         fail_fence: bool,
         fence_calls: usize,
         finishes: usize,
+        // Ordering violations seen while executing. The fake GL entry points are
+        // `extern "system"` and must not unwind, so tests check these afterwards.
+        errors: Vec<&'static str>,
     }
 
     impl Driver {
@@ -297,12 +300,19 @@ mod tests {
         }
 
         fn execute(&mut self, context: usize, end: usize) {
-            assert!(end <= self.queues[context].submitted, "producer was not flushed");
+            if end > self.queues[context].submitted {
+                self.errors.push("producer was not flushed");
+                return;
+            }
             while self.queues[context].completed < end {
                 let index = self.queues[context].completed;
                 match self.queues[context].commands[index] {
                     Command::Write(value) => self.value = value,
-                    Command::Read(expected) => assert_eq!(self.value, expected, "unordered texture access"),
+                    Command::Read(expected) => {
+                        if self.value != expected {
+                            self.errors.push("unordered texture access");
+                        }
+                    }
                     Command::Wait(fence) => {
                         let (producer, end) = self.fences[&fence];
                         self.execute(producer, end);
@@ -378,6 +388,10 @@ mod tests {
         });
     }
 
+    fn assert_ordered() {
+        DRIVER.with_borrow(|driver| assert!(driver.errors.is_empty(), "{:?}", driver.errors));
+    }
+
     #[test]
     fn same_context_updates_need_no_texture_fences() {
         let gl = gl();
@@ -393,6 +407,7 @@ mod tests {
         command(0, Command::Read(2));
         finish();
         DRIVER.with_borrow(|driver| assert_eq!(driver.fence_calls, 0));
+        assert_ordered();
     }
 
     #[test]
@@ -420,6 +435,7 @@ mod tests {
                 assert_eq!(queue.completed, queue.submitted);
             }
         });
+        assert_ordered();
     }
 
     #[test]
@@ -445,6 +461,7 @@ mod tests {
                 assert_eq!(queue.completed, queue.commands.len());
             }
         });
+        assert_ordered();
     }
 
     #[test]
@@ -464,6 +481,7 @@ mod tests {
                 assert_eq!(driver.fence_calls, if fencing { 2 } else { 0 });
                 assert_eq!(driver.queues[1].completed, 1);
             });
+            assert_ordered();
         }
     }
 }

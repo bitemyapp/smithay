@@ -37,8 +37,12 @@ Renderer regressions include deterministic delayed-reader/error tests and
 explicitly ignored real EGL and two-render-node GPU checks. The latter need no
 DRM master or display: `SMITHAY_TEST_RENDER_NODE` and `SMITHAY_TEST_TARGET_NODE`
 select the devices. `SMITHAY_TEST_EGL_DEVICE` selects an enumerated EGL device;
-without it, the context checks use Mesa surfaceless. Repeat the Mesa checks with
-`MESA_GLES_VERSION_OVERRIDE=2.0` for GLES2 completion.
+without it, the context checks use the platform's surfaceless display, and
+`SMITHAY_TEST_EXPECT_RENDERER` makes them fail on an unexpected driver. The
+`cross_thread` EGL checks detect missing publication on hardware drivers, not on
+llvmpipe. Repeat the EGL checks with `MESA_GLES_VERSION_OVERRIDE=2.0` for GLES2
+completion, skipping the GLES 3 `cross_thread_readback` and `cross_thread_blit`
+checks.
 
 ## 0.7.0
 

@@ -1,6 +1,16 @@
-//! These tests require a real EGL implementation (Mesa surfaceless works).
+//! These tests require a real EGL implementation. Without `SMITHAY_TEST_EGL_DEVICE`
+//! they use the platform's surfaceless display, which libglvnd may route to a non-Mesa
+//! driver; set `SMITHAY_TEST_EXPECT_RENDERER` to a substring of the expected
+//! `GL_RENDERER` to fail instead of running on the wrong driver.
 //! Run explicitly with `--ignored --test-threads=1`; repeat with
-//! `MESA_GLES_VERSION_OVERRIDE=2.0` to exercise the GLES2 completion path.
+//! `MESA_GLES_VERSION_OVERRIDE=2.0` to exercise the GLES2 completion path, skipping
+//! the `cross_thread_readback` and `cross_thread_blit` tests, which need GLES 3.
+//!
+//! The same-thread tests switch contexts with `eglMakeCurrent`, which flushes the
+//! previously current context and hides missing synchronization. The `cross_thread`
+//! tests keep the producer current while a consumer on another thread accesses the
+//! texture. They detect missing publication on hardware drivers; llvmpipe completes
+//! uploads on the CPU and cannot.
 
 use super::*;
 use crate::backend::egl::{
@@ -34,7 +44,26 @@ fn display() -> EGLDisplay {
 }
 
 fn renderer(display: &EGLDisplay, fencing: bool) -> GlesRenderer {
-    let context = EGLContext::new(display).unwrap();
+    let renderer = with_context(EGLContext::new(display).unwrap(), fencing);
+    if let Ok(expected) = std::env::var("SMITHAY_TEST_EXPECT_RENDERER") {
+        let name = unsafe {
+            renderer.egl.make_current().unwrap();
+            let name = std::ffi::CStr::from_ptr(renderer.gl.GetString(ffi::RENDERER) as *const _)
+                .to_string_lossy()
+                .into_owned();
+            // GlesRenderer::new leaves its context unbound; keep that state.
+            renderer.egl.unbind().unwrap();
+            name
+        };
+        assert!(
+            name.contains(&expected),
+            "GL_RENDERER {name:?} does not contain {expected:?}"
+        );
+    }
+    renderer
+}
+
+fn with_context(context: EGLContext, fencing: bool) -> GlesRenderer {
     let mut renderer = unsafe { GlesRenderer::new(context).unwrap() };
     if !fencing {
         renderer.capabilities.retain(|cap| *cap != Capability::Fencing);
@@ -43,12 +72,10 @@ fn renderer(display: &EGLDisplay, fencing: bool) -> GlesRenderer {
 }
 
 fn shared(renderer: &GlesRenderer, fencing: bool) -> GlesRenderer {
-    let context = EGLContext::new_shared(renderer.egl.display(), &renderer.egl).unwrap();
-    let mut renderer = unsafe { GlesRenderer::new(context).unwrap() };
-    if !fencing {
-        renderer.capabilities.retain(|cap| *cap != Capability::Fencing);
-    }
-    renderer
+    with_context(
+        EGLContext::new_shared(renderer.egl.display(), &renderer.egl).unwrap(),
+        fencing,
+    )
 }
 
 fn pixel(renderer: &mut GlesRenderer, texture: &GlesTexture) -> [u8; 4] {
@@ -243,5 +270,167 @@ fn first_share_rejects_wrong_client_api_without_changing_it() {
         assert!(result.is_err());
         assert_eq!(api, ffi_egl::OPENGL_API);
         assert!(!source.is_shared());
+    }
+}
+
+const CROSS_THREAD_SIZE: i32 = 512;
+const RED: [u8; 4] = [255, 0, 0, 255];
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+const BLUE: [u8; 4] = [0, 0, 255, 255];
+
+fn cross_thread_size() -> Size<i32, BufferCoord> {
+    (CROSS_THREAD_SIZE, CROSS_THREAD_SIZE).into()
+}
+
+fn solid(color: [u8; 4]) -> Vec<u8> {
+    color.repeat((CROSS_THREAD_SIZE * CROSS_THREAD_SIZE) as usize)
+}
+
+// Samples the texture from a renderer on another thread, while the caller's renderer
+// stays current on its own thread and so is never flushed implicitly.
+fn sample_on_other_thread(context: EGLContext, texture: &GlesTexture, fencing: bool) -> [u8; 4] {
+    let texture = texture.clone();
+    std::thread::spawn(move || {
+        let mut consumer = with_context(context, fencing);
+        let target: GlesTexture = consumer.create_buffer(Fourcc::Abgr8888, (1, 1).into()).unwrap();
+        let _done = draw(&mut consumer, &texture, &target);
+        pixel(&mut consumer, &target)
+    })
+    .join()
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires surfaceless EGL and a real GLES driver"]
+fn cross_thread_first_share_completes_unflushed_upload() {
+    for fencing in [true, false] {
+        let display = display();
+        let mut producer = renderer(&display, fencing);
+        let texture = producer
+            .import_memory(&solid(RED), Fourcc::Abgr8888, cross_thread_size(), false)
+            .unwrap();
+        producer
+            .update_memory(&texture, &solid(GREEN), Rectangle::from_size(cross_thread_size()))
+            .unwrap();
+        // Never shared so far: the upload has no texture fence and was not flushed.
+        assert!(producer.egl.is_current());
+        let context = EGLContext::new_shared(producer.egl.display(), &producer.egl).unwrap();
+        assert_eq!(
+            sample_on_other_thread(context, &texture, fencing),
+            GREEN,
+            "fencing: {fencing}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires surfaceless EGL and a real GLES driver"]
+fn cross_thread_shared_upload_is_published() {
+    for fencing in [true, false] {
+        let display = display();
+        let mut producer = renderer(&display, fencing);
+        let context = EGLContext::new_shared(producer.egl.display(), &producer.egl).unwrap();
+        let texture = producer
+            .import_memory(&solid(RED), Fourcc::Abgr8888, cross_thread_size(), false)
+            .unwrap();
+        producer
+            .update_memory(&texture, &solid(GREEN), Rectangle::from_size(cross_thread_size()))
+            .unwrap();
+        assert!(producer.egl.is_current());
+        assert_eq!(
+            sample_on_other_thread(context, &texture, fencing),
+            GREEN,
+            "fencing: {fencing}"
+        );
+    }
+}
+
+// Lets a consumer thread queue a read of a green texture, overwrites the texture with
+// blue on this thread, and only then lets the consumer resolve what it read. The
+// overwrite is ordered after the read only through the read's publication.
+fn read_then_overwrite<T: Send + 'static>(
+    fencing: bool,
+    read: impl FnOnce(&mut GlesRenderer, &GlesTexture) -> T + Send + 'static,
+    resolve: impl FnOnce(&mut GlesRenderer, T) -> bool + Send + 'static,
+) -> bool {
+    let display = display();
+    let mut producer = renderer(&display, fencing);
+    let context = EGLContext::new_shared(producer.egl.display(), &producer.egl).unwrap();
+    let texture = producer
+        .import_memory(&solid(GREEN), Fourcc::Abgr8888, cross_thread_size(), false)
+        .unwrap();
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    let (overwritten_tx, overwritten_rx) = std::sync::mpsc::channel();
+    let shared_texture = texture.clone();
+    let consumer = std::thread::spawn(move || {
+        let mut consumer = with_context(context, fencing);
+        assert!(
+            consumer.capabilities().contains(&Capability::Blit),
+            "requires GLES 3; skip this test under MESA_GLES_VERSION_OVERRIDE=2.0"
+        );
+        let pending = read(&mut consumer, &shared_texture);
+        read_tx.send(()).unwrap();
+        overwritten_rx.recv().unwrap();
+        resolve(&mut consumer, pending)
+    });
+    if read_rx.recv().is_ok() {
+        producer
+            .update_memory(&texture, &solid(BLUE), Rectangle::from_size(cross_thread_size()))
+            .unwrap();
+        overwritten_tx.send(()).unwrap();
+    }
+    consumer.join().unwrap()
+}
+
+#[test]
+#[ignore = "requires surfaceless EGL and a GLES 3 driver"]
+fn cross_thread_readback_completes_before_overwrite() {
+    for fencing in [true, false] {
+        let observed_green = read_then_overwrite(
+            fencing,
+            |consumer, texture| {
+                consumer
+                    .copy_texture(
+                        texture,
+                        Rectangle::from_size(cross_thread_size()),
+                        Fourcc::Abgr8888,
+                    )
+                    .unwrap()
+            },
+            |consumer, mapping| {
+                let pixels = consumer.map_texture(&mapping).unwrap();
+                pixels.chunks_exact(4).all(|pixel| pixel == GREEN)
+            },
+        );
+        assert!(
+            observed_green,
+            "readback observed the overwrite (fencing: {fencing})"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires surfaceless EGL and a GLES 3 driver"]
+fn cross_thread_blit_source_completes_before_overwrite() {
+    for fencing in [true, false] {
+        let observed_green = read_then_overwrite(
+            fencing,
+            |consumer, texture| {
+                let copy: GlesTexture = consumer
+                    .create_buffer(Fourcc::Abgr8888, cross_thread_size())
+                    .unwrap();
+                {
+                    let source = consumer.bind_texture(texture).unwrap();
+                    let mut target = consumer.bind_texture(&copy).unwrap();
+                    let rect = Rectangle::from_size((CROSS_THREAD_SIZE, CROSS_THREAD_SIZE).into());
+                    consumer
+                        .blit(&source, &mut target, rect, rect, TextureFilter::Nearest)
+                        .unwrap();
+                }
+                copy
+            },
+            |consumer, copy| pixel(consumer, &copy) == GREEN,
+        );
+        assert!(observed_green, "blit observed the overwrite (fencing: {fencing})");
     }
 }
