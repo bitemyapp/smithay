@@ -203,12 +203,31 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: System dependencies
-        run: sudo apt-get update; sudo apt-get install -y libdrm-dev libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpixman-1-dev
-      
+        run: sudo apt-get update; sudo apt-get install -y libdrm-dev libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpixman-1-dev libegl-mesa0 libgl1-mesa-dri
+
       - name: Run tests
         env:
           RUST_BACKTRACE: full
         run: cargo test --features "test_all_features"
+
+      # Ignored by default because they need a real EGL driver. They fail rather than
+      # pass if no surfaceless llvmpipe display is available. On llvmpipe they cover
+      # context restoration, client API checks and pixel results, not missing
+      # publication, which only hardware drivers expose.
+      - name: Run EGL synchronization tests on llvmpipe
+        env:
+          RUST_BACKTRACE: full
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SMITHAY_TEST_EXPECT_RENDERER: llvmpipe
+        run: cargo test --features "test_all_features" --lib backend::renderer::gles::sync_tests -- --ignored --test-threads=1
+
+      - name: Run EGL synchronization tests on llvmpipe with GLES 2
+        env:
+          RUST_BACKTRACE: full
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          SMITHAY_TEST_EXPECT_RENDERER: llvmpipe
+          MESA_GLES_VERSION_OVERRIDE: "2.0"
+        run: cargo test --features "test_all_features" --lib backend::renderer::gles::sync_tests -- --ignored --test-threads=1 --skip cross_thread_readback --skip cross_thread_blit
 
   smallvil-check:
     needs:
