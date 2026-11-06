@@ -27,9 +27,10 @@ use tracing::{info, info_span, instrument, trace, warn};
 ///
 /// Creating the first shared context completes commands queued by the original
 /// context before exposing the new one. The calling thread's current context and
-/// read/draw surfaces are preserved on success. An unbound source must support
-/// being made current without surfaces for this synchronization, and the OpenGL
-/// ES client API must remain bound as set by [`EGLDisplay`] initialization.
+/// read/draw surfaces are preserved on success; if they cannot be restored, creation
+/// fails and the thread may be left without its previous context. An unbound source
+/// must support being made current without surfaces for this synchronization, and the
+/// OpenGL ES client API must remain bound as set by [`EGLDisplay`] initialization.
 #[derive(Debug)]
 pub struct EGLContext {
     context: ffi::egl::types::EGLContext,
@@ -376,9 +377,9 @@ impl EGLContext {
         })
     }
 
-    // EGLContext is !Sync. Its Send contract requires it to be unbound before moving
-    // threads, so a legitimately borrowed source cannot be current on another thread.
-    // No sibling is exposed until both completion and restoration have succeeded.
+    // EGLContext is !Sync, so the borrowed source is not used elsewhere during this call.
+    // If it is still current on another thread, making it current here fails before any
+    // work. No sibling is exposed until both completion and restoration have succeeded.
     fn finish_before_sharing(&self) -> Result<(), EGLError> {
         unsafe {
             // Current-context queries refer to the bound client API.
@@ -430,11 +431,9 @@ impl EGLContext {
                 )
             });
             if let Err(err) = restoration {
-                // Do not leave an originally unbound, Send context current after
-                // returning an error. Aborting is necessary if EGL cannot release it.
-                if self.unbind().is_err() {
-                    std::process::abort();
-                }
+                // Release the source as well when possible. Otherwise it stays current
+                // here, as after any other operation of a renderer using it.
+                let _ = self.unbind();
                 return Err(err);
             }
             completion
